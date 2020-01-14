@@ -1,0 +1,11 @@
+SPI - commercial, unmodified soy
+130 - heated to 130C and cooled
+115 - heated to 115C and cooled
+PC - powdered pellet pressed while cool
+PH - powdered pellet pressed while hot 130C
+SB - sample from raw soy bean
+SM - powdered commercial soy meal
+HY - spi hydrate
+WAT - water
+
+samples with a 2 after the name just mean I used a different batch

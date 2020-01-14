@@ -1,0 +1,30 @@
+
+./core						contains Error classes
+./vecmath					a class for Vector operations
+./globals					S-string F-file M-math G-global T-test
+./chem
+	/translate				CDK data interface
+	/mollib					structure generators for specific molecules
+	/util
+		/structure		
+			AtomGraph		path finding functions
+			LinkSite		???
+			Assembler		molecule merging functions
+		/pattern			pattern matcher code
+			/patterns		pattern matchers for specific molecules
+		/reaction			graph transformers for reactions
+		/conformation
+			MassCenter		center of mass calculations
+			AtomDistance		distance calculations
+			ModifyConformation	transformers for molecular substructures
+			BondAngle		transformers and calculations for bond angles
+			TorsionAngle		transformers and calculations for bond torsion angles
+			Align			???
+			WeightedKabschAlign	???
+		/analysis			Clustering
+	/search					Genetic algorithm search
+	/cli					Driver app. converion, clustering, searching
+	/forcefield				Test energy evaluation
+	/core					Representations and operations on basic molecular structures
+		AtomElementPositionComparator	???
+		RingAnalysis			Ring searchers

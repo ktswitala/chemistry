@@ -1,0 +1,600 @@
+
+using System;
+using System.Collections.Generic;
+using System.Decimal;
+using System.IO;
+using System.Text;
+
+using Nemerle.Collections;
+using Nemerle.Utility;
+using Nemerle.Compiler;
+using Nemerle.Imperative;
+
+namespace FormatHelper
+{
+  internal type datafile = array [Byte];
+  
+  module Application
+  {
+    // sequencing operator for functions that take a single object parameter and return void
+    // allows left-to-right function application instead of inner to outer on objects
+    // not nessessarily useful for anything ever :)
+    public @<<[a'](o : a', f : a' -> void) : a'
+    {
+      f(o);
+      o
+    }
+    // applies a function with an object parameter to a list of objects 
+    public Apply[a'](ol : list[a'], f : a' -> void) : void
+    {
+      foreach (o in ol)
+      {
+        f(o);
+      }
+    }
+  }
+  using Application;
+  
+  // Compares 
+  public class ListComparator[a',b'] : IEqualityComparer[a'] where a' : IList[b'] where b' : IComparable
+  {
+    public Equals( e1 : a', e2 : a' ) : bool
+    {
+      isequal: {
+      when (e1.Count != e2.Count)
+      {
+        isequal(false);
+      }
+      
+      def (i1,i2) = (e1.GetEnumerator(), e2.GetEnumerator());
+      _ = (i1.MoveNext(), i2.MoveNext());
+      
+      do
+      {
+        when (i1.Current.CompareTo(i2.Current) != 0)
+        {
+          isequal(false);
+        }
+        _ = i2.MoveNext();
+      } while(i1.MoveNext());
+      true;
+      }
+    }
+    public GetHashCode( e : a' ) : int
+    {
+      e.Item[0].GetHashCode()
+    }
+  }
+
+  public class ValueTracker[a',b']
+  {
+    mutable public blocks : Dictionary[a', HashSet[ b' ] ];
+
+    private BlockComparer : option[IEqualityComparer[a']];
+    private ElementComparer : option[IEqualityComparer[b']];
+    
+    [Accessor (flags=WantSetter)] private mutable block_printer : (a' -> string);
+    [Accessor (flags=WantSetter)] private mutable element_printer : (b' -> string);
+    
+    public this()
+    {
+      init();
+      BlockComparer = option.None();
+      ElementComparer = option.None();
+      blocks = Dictionary();
+    }
+    public this(cmp1 : IEqualityComparer[a'])
+    {
+      init();
+      BlockComparer = option.Some(cmp1);
+      ElementComparer = option.None();
+      blocks = Dictionary(cmp1);
+    }
+    public this(cmp1 : IEqualityComparer[b'])
+    {
+      init();
+      BlockComparer = option.None();
+      ElementComparer = option.Some(cmp1);
+      blocks = Dictionary();
+    }
+    public this(cmp1 : IEqualityComparer[a'], cmp2 : IEqualityComparer[b'])
+    {
+      init();
+      BlockComparer = option.Some(cmp1);
+      ElementComparer = option.Some(cmp2);
+      blocks = Dictionary(cmp1);
+    }
+    private init() : void
+    {
+      block_printer = _.ToString();
+      element_printer = _.ToString();
+    }
+    public static ASCIIBytes(bs : array[Byte]) : string
+    {
+      Text.ASCIIEncoding().GetString( bs );
+    }
+    public static HexBytes( bs : array[Byte]) : string
+    {
+      bs.Fold("", fun(b : Byte, s : string) { s + Convert.ToString(b, 16).PadLeft(2, '0') } );
+    }
+    protected CreateBlock(name : a') : void
+    {
+      blocks[name] = match (ElementComparer)
+      {
+        | Some (ec) => HashSet(ec)
+        | None => HashSet()        
+      }
+    }
+    public AddObservation(name : a', observ : b') : bool
+    {
+      mutable hs;  
+      when (!blocks.TryGetValue( name, out hs ))
+      {
+        CreateBlock( name );
+        hs = blocks[name];
+      }
+      hs.Add( observ );
+    }
+    public Report(tw : TextWriter) : void
+    {
+      tw.Write("ValueTracker report:\n");
+      foreach ( kv in blocks )
+      {
+        tw.Write( block_printer(kv.Key) + ":\n" );
+        foreach ( ele in kv.Value )
+        {
+          tw.Write( element_printer(ele) + " ")
+        }
+        tw.Write("\n");
+      }
+    }
+  }
+ 
+  public class OPUSDataFile
+  {
+    public class ValueParamData
+    {
+      public mutable first_pt : double;
+      public mutable last_pt : double;
+      public mutable num_pts : UInt32;
+    }
+    public variant ValueID
+    {
+      | ScSm
+      | ScRf
+      | IgSm
+      | IgRf
+      | PhSm
+      | AB
+    }
+    public variant BlockID
+    {
+      | Optic
+      | Instrument
+      | FT
+      | Acquisition
+      | Sample
+      | Values { id : ValueID }
+      | ValueParams { id : ValueID }
+      | Unknown
+    }
+    public IdentifyBlockID(raw_id : UInt32) : BlockID
+    {
+      match(raw_id) 
+      {
+        | 32 => BlockID.Instrument()
+        | 48 => BlockID.Acquisition()
+        | 64 => BlockID.FT()
+        | 96 => BlockID.Optic()
+        | 160 => BlockID.Sample()
+        | 1031 => BlockID.Values( ValueID.ScSm() )
+        | 1031+16 => BlockID.ValueParams( ValueID.ScSm() )
+        | 1035 => BlockID.Values( ValueID.ScRf() )
+        | 1035+16 => BlockID.ValueParams( ValueID.ScRf() )
+        | 2055 => BlockID.Values( ValueID.IgSm() )
+        | 2055+16 => BlockID.ValueParams( ValueID.IgSm() )
+        | 2059 => BlockID.Values( ValueID.IgRf() )
+        | 2059+16 => BlockID.ValueParams( ValueID.IgRf() )
+        | 3079 => BlockID.Values( ValueID.PhSm() )
+        | 3079+16 => BlockID.ValueParams( ValueID.PhSm() )
+        | 4111 => BlockID.Values( ValueID.AB() )
+        | 4111+16 => BlockID.ValueParams( ValueID.AB() )
+        | _ => BlockID.Unknown()
+      }
+    }
+    variant BlockData
+    {
+      | Hash { h : Dictionary[string,array[Byte]] }
+      | ValueParams { h : Dictionary[string,array[Byte]]; vp : ValueParamData }
+      | Values { v : array[float] }
+    }
+    public class Block
+    {
+      public mutable raw_id : UInt32;
+      public mutable size : UInt32;
+      public mutable offset : UInt32;
+      public mutable id : BlockID;
+      public mutable data : BlockData;
+    }
+    
+    [Accessor] private mutable filename : string;
+    private mutable opus_data : datafile; 
+    private mutable blocks : array[Block];
+    [Accessor] private mutable dictBlocks : Dictionary[UInt32, Block];
+    
+    public WriteBlock(tw : TextWriter, b : Block) : void
+    {
+      def param_block = dictBlocks[ b.raw_id + 16 ];
+      mutable fst, snd, pts;
+      (fst, snd, pts) = match(param_block.data)
+      {
+        | ValueParams(_, vp) => (vp.first_pt, vp.last_pt, vp.num_pts)
+        | _ => throw Exception("WriteBlock error: no ValueParam block assoicated with param block")
+      }
+      def vs = match(b.data)
+      {
+        | Values(vs) => vs
+        | _ => throw Exception("WriteBlock error: block is not a Values block ")
+      }
+      when ( pts :> int != vs.Length )
+      {
+        Console.WriteLine("{0} {1}", System.Math.Round( (snd-fst) / pts ), vs.Length );
+        throw Exception("WriteBlock error: first column length does not match values column length");
+      }
+      mutable i = Decimal(fst);
+      def step = (Decimal(snd) - Decimal(fst)) / (Decimal(pts) - 1) ;
+      foreach( val in vs )
+      {
+        tw.Write( i.ToString() + " " + val.ToString() + "\n");
+        i = Decimal.Add( i, step);
+      }
+    }
+    public ProcessHeader(fn : string, d : datafile) : void
+    {
+      filename = fn;
+      opus_data = d;
+
+      // read headers
+      def block_count = BitConverter.ToUInt32(d, 0x14);
+      blocks = array(block_count :> int);
+      dictBlocks = Dictionary();
+      for (mutable i = 0; i < block_count :> int; i++)
+      {
+        blocks[i] = Block();
+        def b = blocks[i];                                              
+        b.raw_id = BitConverter.ToUInt32(d, 0x18 + i*12);
+        b.size = BitConverter.ToUInt32(d, 0x18 + i*12 + 4);
+        b.offset = BitConverter.ToUInt32(d, 0x18 + i*12 + 8);
+        b.id = IdentifyBlockID( b.raw_id );
+        dictBlocks[b.raw_id] = b;
+      }
+      ProcessBlockData();
+    }
+    public ProcessBlockData() : void
+    {
+      // hashes must be processed first because values depend on valueparams
+      foreach (b in blocks)
+      {
+        match (b.id)
+        {
+          | Values(_) => { }
+          | _ => ProcessHash( b )
+        }
+      }
+      foreach (b in blocks)
+      {
+        match (b.id)
+        {
+          | Values(_) => ProcessValues( b )
+          | _ => { } 
+        }
+      }
+    }
+    public ProcessHash( b : Block ) : void
+    {
+      def h = Dictionary();
+      def dp = ValueParamData();
+      def ProcessFormat( fmts )
+      {
+        mutable pos = 0;
+        mutable end_block = false;
+        def format_hash = Dictionary();
+        Apply(fmts, fun (nam, sz) { format_hash[nam] = sz; } );
+        mutable sz;
+        while ( !end_block )
+        {
+          when (pos > (b.size*4) :> int)
+          {
+            Console.WriteLine(pos);
+            Console.WriteLine(b.size);
+            throw Exception("Read past data block end and didnt find end block....Quitting")
+          }
+          mutable name = ASCIIEncoding().GetString(opus_data, b.offset :> int + pos, 4);
+          while( name[name.Length-1] == 0 )
+          {
+            name = name.Remove(name.Length-1);
+          }
+          when (!format_hash.TryGetValue( name, out sz ))
+          {
+            Console.WriteLine(name);
+            throw Exception("The hash name was not in the valid set of names: " + filename);
+          }
+          def dat = array( (sz-1) * 4 );
+          Array.Copy(opus_data, b.offset :> int + pos + 4, dat, 0, dat.Length);
+          pos += dat.Length + 4;
+          h[ name ] = dat;
+          when (name == "END")
+          {
+            end_block = true;
+          }
+        }
+      }
+      def ProcessValueParams( )
+      {
+        def format = [ ("CSF", 4), ("MXY", 4), ("MNY", 4), ("DAT", 5), ("TIM", 5), ("DXU", 3), 
+                       ("DPF", 3), ("NPT", 3), ("FXV", 4), ("LXV", 4), ("QS1", 3), ("SMO", 3), 
+                       ("QS0", 3), ("SN1", 4), ("SN2", 4), ("SN3", 4), ("SN4", 4), ("NF1", 4),
+                       ("NF2", 4), ("END", 2) ];
+        
+        ProcessFormat( format );
+        dp.num_pts = BitConverter.ToUInt32( h["NPT"], 4 );
+        dp.first_pt = BitConverter.ToDouble( h["FXV"], 4 );
+        dp.last_pt = BitConverter.ToDouble( h["LXV"], 4 );
+        b.data = BlockData.ValueParams(h, dp);
+      }
+      def ProcessAcquisitionParams( )
+      {
+        def format = [ ("AQM", 3), ("COR", 3), ("DEL", 3), ("DLY", 3), ("HFW", 4), ("LFW", 4), 
+                       ("NSS", 3), ("PLF", 3), ("RES", 4), ("TDL", 3), ("END", 2) ];
+        ProcessFormat( format );
+        b.data = BlockData.Hash(h);
+      }
+      def ProcessInstrumentParams( )
+      {
+        def format = [ ("HFL", 4), ("LFL", 4), ("LWN", 4), ("ABP", 3), ("SSP", 3), ("ARG", 3), ("ASG", 3),
+                       ("SGP", 3), ("SGW", 3), ("DUR", 4), ("PKA", 3), ("PKL", 3), ("GFW", 3), 
+                       ("BFW", 3), ("PRA", 3), ("PRL", 3), ("GBW", 3), ("BBW", 3), ("INS", 5),
+                       ("ASS", 3), ("ARS", 3), ("RSN", 3), ("END", 2) ];
+        ProcessFormat( format );
+        b.data = BlockData.Hash(h);
+      }
+      match (b.id)
+      {
+        | ValueParams(_) => ProcessValueParams( )
+        | Acquisition => ProcessAcquisitionParams( )
+        | Instrument => ProcessInstrumentParams( )
+        | _ => { }
+      }
+    }
+    public AllExists(values : list[UInt32]) : bool * list[Block] {
+      values.FoldRight((true, []), fun(value, acc) {
+        | (value, (true, result)) =>
+            mutable block;
+            if(DictBlocks.TryGetValue(value, out block))
+                (true, block :: result)
+            else
+                (false, [])
+        | _ =>  acc
+      } )
+    }
+    public ProcessValues(b : Block) : void
+    {
+      // find associated data parms
+      def bvp = dictBlocks[ b.raw_id+16 ];
+      def points = match (bvp.data)
+      {
+        | ValueParams(_, vp) => vp.num_pts
+        | _ => throw Exception("Invalid block given in ProcessValues, no associated parameter data")
+      }      
+      def vals = array(points :> int);
+      def end = b.offset + (points*4);
+      mutable i = 0;
+      for (mutable offset = b.offset; offset != end; offset += 4)
+      {
+        vals[i] = BitConverter.ToSingle( opus_data, offset :> int );
+        i++;
+      }
+      b.data = BlockData.Values( vals )
+    }
+    public GenerateCode1( tw : TextWriter ) : void
+    {
+      mutable aq, inst;
+      when (!DictBlocks.TryGetValue( 32, out inst ))
+      {
+        return;
+      }
+      when (!DictBlocks.TryGetValue( 48, out aq ))
+      {
+        return;
+      }
+      
+      def aq_h = match (aq.data)
+      {
+        | Hash(h) => h
+        | _ => throw Exception("GenerateCode1 failed - 1")
+      }
+      def inst_h = match(inst.data)
+      {
+        | Hash(h) => h
+        | _ => throw Exception("GenerateCode1 failed - 2")
+      }
+      def aqm = ASCIIEncoding().GetString(aq_h["AQM"], 4, 2);
+      def res = BitConverter.ToDouble(aq_h["RES"], 4);
+      def lwn = BitConverter.ToDouble(inst_h["LWN"], 4);
+      tw.Write( $"filename <- \"$(Path.GetFileName(filename))\"\n");
+      tw.Write( $"aqm <- \"$aqm\"\n");
+      tw.Write( $"res <- $res\n") ;
+      tw.Write( $"lwn <- $lwn\n") ;
+      tw.Write( "ig.process.from.nemerle()\n" )
+    }
+    public PeekFloats( tw : TextWriter ) : void
+    {
+      tw.Write("Filename:" + filename + "\n");
+      foreach (b in blocks)
+      {
+        tw.Write( b.raw_id.ToString() + " " + BitConverter.ToSingle(opus_data, b.offset :> int).ToString() + "\n" ); 
+        tw.Write( b.raw_id.ToString() + " " + BitConverter.ToSingle(opus_data, (b.offset + 4) :> int).ToString() + "\n" ); 
+        tw.Write( b.raw_id.ToString() + " " + BitConverter.ToSingle(opus_data, (b.offset + 8) :> int).ToString() + "\n" ); 
+        tw.Write( b.raw_id.ToString() + " " + BitConverter.ToSingle(opus_data, (b.offset + 12) :> int).ToString() + "\n" ); 
+      }
+    }
+    public TrackHeaders(vt : ValueTracker[string,Byte]) : void
+    {
+      for(mutable i = 0; i < 64; i++)
+      {
+        _ = vt.AddObservation("header" + i.ToString(), opus_data[i]);
+      }
+    }
+    public TrackBlockInitialData(vt1 : ValueTracker[UInt32, array[Byte]], vt2 : ValueTracker[UInt32, array[Byte]]) : void
+    {
+      foreach (b in blocks)
+      {
+        def initialdata = array(4);
+        Array.Copy(opus_data, b.offset, initialdata, 0, 4);
+        _ = vt1.AddObservation( b.raw_id, initialdata );
+        _ = vt2.AddObservation( b.size, initialdata );
+      }
+    }
+    public TrackHash( s : string, vt : ValueTracker[string, array[Byte]], b : Block ) : void
+    {
+      def h = match(b.data)
+      {
+        | Hash(h) => h
+        | _ => throw Exception("Hash Value not given")
+      }
+      _ = vt.AddObservation( s, h[s] );
+    }
+    public ReportBlocks(tw : TextWriter) : void
+    {
+      tw.Write("Filename:" + filename + "\n");
+      tw.Write("Blocks: \n");
+      foreach (b in blocks)
+      {
+        def start = Convert.ToString(b.offset, 16).PadLeft(8, '0');
+        def end = Convert.ToString(b.offset+(b.size*4), 16).PadLeft(8, '0');
+        tw.Write( start + "-" + end + ": " + b.raw_id.ToString() + " " + b.size.ToString() + "\n");
+      }
+    }
+    public DumpValues(tw : TextWriter) : void
+    {
+      tw.Write("Filename:" + filename + "\n");
+      tw.Write("Blocks: \n");
+      foreach (b in blocks)
+      {
+        tw.Write( b.raw_id.ToString() + "====================================================================================================\n");
+        match (b.data)
+        {
+          | Values(vals) => foreach( v in vals) { tw.Write(v.ToString() + "\n"); }
+          | _ => ProcessHash( b )
+        }
+      }
+    }
+  }
+   
+  module Driver
+  {
+    // Reads an entire stream and returns an array of bytes
+    public ReadAll( s : Stream ) : array [Byte]
+    {
+      mutable data = array(s.Length :> int);
+      mutable bytesRead = 0;
+      mutable bytesLeft = data.Length;
+      mutable bytesLastRead = 1;
+      while (bytesLastRead > 0)
+      {
+        bytesLastRead = s.Read( data, bytesRead, bytesLeft );
+        bytesRead += bytesLastRead;
+        bytesLeft -= bytesLastRead;
+      }
+      when (bytesLeft > 0)
+      {
+        throw Exception("Couldn't read entire data in ReadAll");
+      }
+      data
+    }
+    public _GenerateFormatInfo(opusfile : list[OPUSDataFile]) : void
+    {
+      //todo: an Apply macro that allows pre and post execution
+      { def sw = StreamWriter( FileStream("C:\\vals.txt",FileMode.Create));
+        opusfile.Head.DumpValues( sw );
+        sw.Flush(); }
+      { def sw = StreamWriter( FileStream("C:\\blocks.txt",FileMode.Create));
+        Apply(opusfile, _.ReportBlocks(sw) );
+        sw.Flush(); }
+      { def sw = StreamWriter( FileStream("C:\\floats.txt",FileMode.Create));
+        Apply(opusfile, _.PeekFloats(sw) );
+        sw.Flush(); }
+
+      def vt1 = ValueTracker(ListComparator());
+      def vt2 = ValueTracker(ListComparator());
+      vt1.ElementPrinter = ValueTracker.ASCIIBytes;
+      vt2.ElementPrinter = ValueTracker.ASCIIBytes;
+      Apply(opusfile, _.TrackBlockInitialData(vt1,vt2));
+      _ = StreamWriter( FileStream("C:\\raw_id.txt",FileMode.Create)) << vt1.Report(_) << _.Flush();
+      _ = StreamWriter( FileStream("C:\\size.txt"  ,FileMode.Create)) << vt2.Report(_) << _.Flush();
+    }
+    public _HashInfo(opusfile : list[OPUSDataFile] ) : void
+    {
+       def vt = ValueTracker(ListComparator());
+       vt.ElementPrinter = ValueTracker.ASCIIBytes;
+       def AQM(of)
+       {
+         mutable b;
+         when (of.DictBlocks.TryGetValue( 48, out b ))
+         {
+           of.TrackHash( "AQM", vt, b );
+         }
+       }
+       Apply(opusfile, AQM(_) );
+      _ = StreamWriter( FileStream("C:\\hashinfo.txt",FileMode.Create)) << vt.Report(_) << _.Flush();
+    }
+    public Write(opusfile : list[OPUSDataFile]) : void
+    {
+      def writeStuff(of) 
+      {
+        def dname = "C:\\opus-out";
+        mutable ab, aq, inst;
+        
+        when (!of.DictBlocks.TryGetValue( 4111, out ab ))
+        {
+          return;
+        }
+        when (!of.DictBlocks.TryGetValue( 32, out inst ))
+        {
+          return;
+        }
+        when (!of.DictBlocks.TryGetValue( 48, out aq ))
+        {
+          return;
+        }
+
+        def sw = StreamWriter( dname + "\\" + Path.GetFileName(of.Filename) + ".ab" );
+        of.WriteBlock( sw, ab );
+        sw.Flush();
+        sw.Close();
+      }
+      Apply(opusfile, writeStuff );
+    }
+    
+    public Main() : void
+    {
+      def filenames = Directory.GetFiles("C:\\opus", "*", SearchOption.AllDirectories).ToList();
+      def filestreams = filenames.Map(fun (filename) { File.OpenRead(filename); } );
+      def filedata = filestreams.Map( ReadAll );
+      def opusfile = $[OPUSDataFile() << _.ProcessHeader(x) | x in filenames.Zip( filedata )];
+      Write(opusfile);
+    }
+  }
+}
+
+// macro SetVariablesToNone(values) syntax ("set_value_to_none",values)
+// { 
+//   def items = match(values) {
+//     | <[ (.. $vals) ]> => vals 
+//     | _ => Message.FatalError("Incorrect syntax") 
+//   }
+//   foreach( item in items ) {  
+//     <[ $(item:usesite) = Nemerle.Core.option.None() ]> 
+//   }
+// }  
+
